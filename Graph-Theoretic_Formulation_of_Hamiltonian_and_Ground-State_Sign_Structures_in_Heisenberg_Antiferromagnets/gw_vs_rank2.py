@@ -44,8 +44,9 @@ graphs = [nk.graph.Chain (16, pbc=True, max_neighbor_order=2),
           nk.graph.Square(4,  pbc=True, max_neighbor_order=2),
           nk.graph.Triangular((4, 4),  pbc=True, max_neighbor_order=2)]
 
-optimizer = optax.adam(1, eps=1e-14)
 n_iter = 500
+optimizer_gw = optax.adam(optax.cosine_decay_schedule(1, n_iter), eps=1e-20)
+optimizer_rank2 = optax.adam(1, eps=1e-20)
 n_hyperplanes = 128
 
 for label, g in zip(labels, graphs):
@@ -65,15 +66,16 @@ for label, g in zip(labels, graphs):
     sign_match_gw = []
     sign_match_rank2 = []
     n = hi.n_states
-    # k = ceil(sqrt(2 * n))
-    k=2
+    k = ceil(sqrt(2 * n))
+    # k=2
     for j2 in tqdm(j2_list):
         ham = ham1 + j2 * ham2
         energy, psi = sp.sparse.linalg.eigsh(ham, k=1, which='SA')
         psi = psi.squeeze()
 
+        # discard very small amplitudes
         psi_abs = np.abs(psi)
-        cond = psi_abs < psi_abs.max() * 1e-9
+        cond = psi_abs < psi_abs.max() * 1e-12
         psi[cond] = 0
         psi_abs[cond] = 0
         signs = np.sign(psi)
@@ -82,21 +84,24 @@ for label, g in zip(labels, graphs):
 
         signs_gw = gw_maxcut(w.data, w.row, w.col,
                              n=n, k=k, n_hyperplanes=n_hyperplanes, n_iter=n_iter,
-                             optimizer=optimizer).block_until_ready()
+                             optimizer=optimizer_gw).block_until_ready()
         signs_rank2 = rank2_maxcut(w.data, w.row, w.col,
-                                   n=n, n_iter=n_iter, optimizer=optimizer).block_until_ready()
+                                   n=n, n_iter=n_iter,
+                                   optimizer=optimizer_rank2).block_until_ready()
 
+        num_nonzero = jnp.count_nonzero(signs)
+        # account for global sign flip
         num_match = jnp.maximum(
                 jnp.count_nonzero(signs_gw == signs),
                 jnp.count_nonzero(signs_gw == -signs),
                 )
-        sign_match_gw.append(float(num_match / jnp.count_nonzero(signs)))
+        sign_match_gw.append(float(num_match / num_nonzero))
 
         num_match = jnp.maximum(
                 jnp.count_nonzero(signs_rank2 == signs),
                 jnp.count_nonzero(signs_rank2 == -signs),
                 )
-        sign_match_rank2.append(float(num_match / jnp.count_nonzero(signs)))
+        sign_match_rank2.append(float(num_match / num_nonzero))
     
     df = pd.DataFrame({
         'J2': j2_list.tolist(),
@@ -104,4 +109,4 @@ for label, g in zip(labels, graphs):
         'Rank2': sign_match_rank2
         })
 
-    print(df.round(3).T)
+    print(df.round(4).T)
